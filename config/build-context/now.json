@@ -1,9 +1,6 @@
 {
-  "name": "my-example",
-  "files": [
-    "index.html"
-  ],
-  "alias": [
-    "my-example.minikube"
-  ]
+  "name": "myexample3",
+  "files": ["index.html"],
+  "alias": ["my-example.minikube"],
+  "version": 1
 }

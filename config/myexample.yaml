@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myexample-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myexample
+  template:
+    metadata:
+      labels:
+        app: myexample
+    spec:
+      containers:
+      - name: myexample-container
+        image: 10.0.2.135:5000/myexample
+      imagePullSecrets:
+      - name: regcred
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: myexample-service
+spec:
+  type: NodePort
+  ports:
+  - name: http
+    targetPort: 80
+    port: 80
+  selector:
+    app: myexample

@@ -1,6 +1,13 @@
-import chalk from 'chalk';
 import * as path from 'path';
-import {exec, readFile, stat} from './utils';
+import {logError, readFile, run, stat} from './utils';
+
+const wait = (ms: number): Promise<undefined> => {
+  return new Promise(resolve => {
+    setTimeout(() => {
+      resolve();
+    }, ms);
+  });
+};
 
 export default async () => {
   // First: Verify we have a Dockerfile.
@@ -9,7 +16,7 @@ export default async () => {
     await stat(dockerFilePath);
   } catch (error) {
     const msg = `Error finding Dockerfile.\n${error.message}`;
-    console.log(chalk.red(msg));
+    logError(msg);
     return;
   }
 
@@ -20,55 +27,115 @@ export default async () => {
     const nowFile = await readFile(nowFilePath);
     nowConfig = JSON.parse(nowFile.toString());
   } catch (error) {
-    console.log(chalk.red(`Error reading now.json.\n${error.message}`));
+    const msg = `Error reading now.json.\n${error.message}`;
+    logError(msg);
     return;
   }
-
-  // Third: Build and tag the image.
-  const { name } = nowConfig;
+  const { name, files = [] } = nowConfig;
   if (!name) {
-    console.log(chalk.red('Specify a "name" in now.json'));
+    logError('Specify a "name" in now.json');
     return;
   }
-  const imageName = `${name}:latest`;
-  try {
-    await exec(`docker build -t ${imageName} -f ./Dockerfile .`);
-    console.log(`Docker image built => ${imageName}`);
-  } catch (error) {
-    console.log(`Could not build image from Dockerfile.\n${error.message}`);
-  }
 
-  // Fourth: Start a local Docker registry, if necessary.
-  let registryRunning = true;
-  try {
-    const { stdout } = await exec(
-      'docker ps --format "{{.Names}}" -f "name=registry"'
-    );
-    if (!stdout) {
-      registryRunning = false;
+  // Create TAR file
+  await run(`tar cvfz ./buildcontext.tar.gz ./Dockerfile ${files.join(' ')}`);
+
+  // Get Docker Registry IP Address
+  const {stdout: dockerIP} = await run('kubectl get service/docker-registry -o jsonpath={.spec.clusterIP}');
+
+  // Init Kaniko
+  await run(`
+  cat <<EOF | kubectl create -f -
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "kaniko"
+      },
+      "spec": {
+        "restartPolicy": "Never",
+        "initContainers": [
+          {
+            "name": "kaniko-init",
+            "image": "alpine",
+            "args": [
+              "sh",
+              "-c",
+              "while true; do sleep 1; if [ -f /tmp/complete ]; then break; fi done"
+            ],
+            "volumeMounts": [
+              {
+                "name": "empty-folder",
+                "mountPath": "/kaniko/build-context"
+              }
+            ]
+          }
+        ],
+        "containers": [
+          {
+            "name": "kaniko",
+            "image": "gcr.io/kaniko-project/executor:latest",
+            "args": [
+              "--context=dir:///kaniko/build-context",
+              "--destination=${dockerIP}:5000/${name}:latest",
+              "--insecure"
+            ],
+            "volumeMounts": [
+              {
+                "name": "empty-folder",
+                "mountPath": "/kaniko/build-context"
+              },
+              {
+                "name": "docker-config",
+                "mountPath": "/kaniko/.docker"
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "empty-folder",
+            "emptyDir": {}
+          },
+          {
+            "name": "docker-config",
+            "secret": {
+              "secretName": "regcred",
+              "items": [
+                {
+                  "key": ".dockerconfigjson",
+                  "path": "config.json"
+                }
+              ]
+            }
+          }
+        ]
+      }
     }
-  } catch (error) {
-    console.log(`Could not determine if registry started.\n${error.message}`);
-    return;
-  }
+  \nEOF`);
 
-  if (registryRunning) {
-    return;
-  }
+  // Wait for available
+  await run('kubectl wait pod/kaniko --for condition=PodScheduled --timeout=60s');
+  await wait(10000);
 
-  try {
-    await exec(
-      'docker run -d -p 5000:5000 --restart=always --name registry registry:2'
-    );
-  } catch (error) {
-    console.log(`Could not start local Docker registry.\n${error.message}`);
-  }
+  // Copy build context to 'kaniko-init' container
+  await run('kubectl cp -c kaniko-init buildcontext.tar.gz kaniko:/tmp/buildcontext.tar.gz');
 
-  // Fifth: Push image to local registry.
+  // Untar the build on the 'kaniko-init' container
+  await run('kubectl exec kaniko -c kaniko-init -- tar -zxf /tmp/buildcontext.tar.gz -C /kaniko/build-context');
 
-  // Sixth: Create or update a deployment.
+  // Trigger initializtion container to finish, so kaniko can build and deploy to the docker registry
+  await run('kubectl exec kaniko -c kaniko-init -- touch /tmp/complete');
 
-  // Seventh: Create or update a service.
+  // Await for completion
+  await run('kubectl wait --for=condition=succeeded pods/kaniko');
 
-  // Eight: Create or update the ingress resource.
+  // Clean up kaniko
+  // await run('kubectl delete pod/kaniko');
+
+  // Create or update a deployment.
+
+  // Create or update a service.
+
+  // Create or update the ingress resource.
 };

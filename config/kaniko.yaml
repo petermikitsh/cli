@@ -20,7 +20,7 @@ spec:
       image: gcr.io/kaniko-project/executor:latest
       args:
         - "--context=dir:///kaniko/build-context"
-        - "--destination=172.17.0.15:5000/foobar:latest"
+        - "--destination=$(echo '172.17.0.15:5000/foobar:latest')"
         - "--insecure"
       volumeMounts:
         - name: empty-folder

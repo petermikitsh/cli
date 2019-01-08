@@ -44,7 +44,7 @@ export default async () => {
       );
 
       // Install docker registry
-      await run('helm install stable/docker-registry');
+      await run('helm install stable/docker-registry --name docker-registry');
 
       if (await confirm('Install an example app on Minikube')) {
         const deployFile = path.resolve(
@@ -94,7 +94,7 @@ export default async () => {
           clusters create "snow-cluster" \
           --zone "us-west1-b" \
           --no-enable-basic-auth \
-          --cluster-version "1.10.9-gke.5" \
+          --cluster-version "1.11.5-gke.5" \
           --image-type "COS" \
           --machine-type "f1-micro" \
           --disk-type "pd-standard" \
@@ -315,6 +315,64 @@ export default async () => {
           }
         }
       \nEOF`);
+
+      // Create persistent storage for docker registry
+      await run(`
+        cat <<EOF | kubectl create -f -
+          {
+            "kind": "PersistentVolumeClaim",
+            "apiVersion": "v1",
+            "metadata": {
+              "name": "docker-registry-pvc"
+            },
+            "spec": {
+              "accessModes": [
+                "ReadWriteOnce"
+              ],
+              "volumeMode": "Filesystem",
+              "resources": {
+                "requests": {
+                  "storage": "8Gi"
+                }
+              }
+            }
+          }
+        \nEOF`);
+
+      // Install docker registry
+      await run(`
+        helm install stable/docker-registry \
+          --tls \
+          --tls-ca-cert $(helm home)/ca.cert.pem \
+          --tls-cert $(helm home)/helm.cert.pem \
+          --tls-key $(helm home)/helm.key.pem \
+          --namespace default \
+          --name docker-registry \
+          --set secrets.htpasswd='user:$2y$05$8nR6bYM2ZKR0tkmJ9KEVTeWVVk77sucXVwZQp2q49t6sR0Oip346C' \
+          --set persistence.enabled=true \
+          --set persistence.existingClaim='docker-registry-pvc'
+      `);
+
+      const {stdout: dockerIP} = await run('kubectl get service/docker-registry -o jsonpath={.spec.clusterIP}');
+
+      // // Create secret/regcred to store registry credentials
+      await run(`kubectl create secret docker-registry regcred --docker-server=${dockerIP}:5000 --docker-username=user --docker-password=password`);
+
+      // // Create ConfigMap for credentials
+      await run(`
+        cat <<EOF | kubectl create -f -
+          {
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+              "name": "docker-config"
+            },
+            "data": {
+              "config.json": "{\\"auths\\":{\\"${dockerIP}:5000\\":{\\"username\\":\\"user\\",\\"password\\":\\"password\\"}}}"
+            }
+          }
+        \nEOF
+      `);
 
       break;
     }

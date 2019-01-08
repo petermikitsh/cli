@@ -1,0 +1,88 @@
+brew cask install google-cloud-sdk
+brew cask install docker
+
+# get kube ui
+minikube dashboard --url
+
+# create a deployment
+kubectl run whoami --image=emilevauge/whoami --port=80 --replicas=5 --expose
+
+# create an ingress for the deployment
+kubectl create -f whoami-ingress.yml
+
+# "hot reload" an existing configuration
+kubectl apply -f whoami-ingress.yml
+
+# switch contexts
+kubectl config use-context minikube
+kubectl config use-context gke_wide-earth-222323_us-west1-b_snow-cluster
+
+### deploy a docker registry
+helm install stable/docker-registry
+
+###
+### kaniko
+### pre-req: have a docker registry deployed
+### pre-req: be in /config folder
+###
+
+# make kaniko pod
+kubectl apply -f kaniko.yaml
+
+# copy build context to 'kaniko-init' container
+kubectl cp -c kaniko-init context.tar.gz kaniko:/tmp/context.tar.gz
+
+# untar the build context in kaniko
+kubectl exec kaniko -c kaniko-init -- tar -zxf /tmp/context.tar.gz -C /kaniko/build-context
+
+# trigger initalization container to finish, so kaniko can build
+kubectl exec kaniko -c kaniko-init -- touch /tmp/complete
+
+# append to all 'helm' CLI cmds
+"--tls --tls-ca-cert $(helm home)/ca.cert.pem --tls-cert $(helm home)/helm.cert.pem --tls-key $(helm home)/helm.key.pem"
+
+# list all certificates, separated by a new line
+kubectl get secrets -l "certmanager.k8s.io/certificate-name" -o jsonpath="{range .items[*]}{.data['tls\.crt']}{'\n'}{end}"
+
+# Watch events for certificates
+kubectl get events --field-selector involvedObject.kind=Certificate --watch-only
+
+# Something
+kubectl patch ingress snow-ingress --patch ""
+
+      // Create a certificate for domain name.
+      // "dnsNames" becomes Subject Alternative Names (SANs)
+      // See page 32: https://media.readthedocs.org/pdf/cert-manager/master/cert-manager.pdf
+      await run(`
+      cat <<EOF | kubectl create -f -
+        {
+          "apiVersion": "certmanager.k8s.io/v1alpha1",
+          "kind": "Certificate",
+          "metadata": {
+            "name": "${domainName}",
+            "namespace": "default"
+          },
+          "spec": {
+            "secretName": "${domainName}",
+            "issuerRef": {
+              "kind": "ClusterIssuer",
+              "name": "letsencrypt-prod"
+            },
+            "commonName": "${domainName}",
+            "dnsNames": ["${domainName}"],
+            "acme": {
+              "config": [
+                {
+                  "http01": {
+                    "ingressClass": "nginx"
+                  },
+                  "domains": [
+                    "${domainName}"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      \nEOF`);
+
